@@ -1,0 +1,92 @@
+version = 1
+
+[nixpkgs]
+channel = "nixos-unstable"
+
+[packages.aarch64-linux.cargo]
+store_path = "/nix/store/1sizh28w89adzfxj33c5zaxk6p3373ar-cargo-1.99.1"
+source = "hydra"
+
+[packages.aarch64-linux.clang]
+store_path = "/nix/store/n8yp2is1iz1l675a1ab3wsycicncrdv7-clang-wrapper-21.1.8"
+source = "hydra"
+
+[packages.aarch64-linux.clippy]
+store_path = "/nix/store/b6nsjqlly9pvxbsxfihrsrip1kkqxw1b-clippy-1.99.1"
+source = "hydra"
+
+[packages.aarch64-linux.cmake]
+store_path = "/nix/store/0zd6p4rf5lf2d8dvg23rr2bjr9i6j8y9-cmake-4.5.0"
+source = "hydra"
+
+[packages.aarch64-linux.gcc]
+store_path = "/nix/store/2ga8y6mc459zx4n7khd21r2yazlrxzzx-gcc-wrapper-16.2.0"
+source = "hydra"
+
+[packages.aarch64-linux.gdb]
+store_path = "/nix/store/vs8wsm2gr7pl8xpk8raj1w5v1d8wbf97-gdb-17.2"
+source = "hydra"
+
+[packages.aarch64-linux.gnumake]
+store_path = "/nix/store/6d8nbrnk1hsqjb8lwh7d2l126ggcwj84-gnumake-4.4.1"
+source = "hydra"
+
+[packages.aarch64-linux."libclang.lib"]
+store_path = "/nix/store/q0zhygylvp7z5pjg7zpjxmm1h6fv70v0-clang-21.1.8-lib"
+source = "nix-eval"
+
+[packages.aarch64-linux.lua5_4]
+store_path = "/nix/store/aglm1qd9jg9m0scdjp4x3jsa0rr2h7m8-lua-5.4.9"
+source = "hydra"
+
+[packages.aarch64-linux.mdbook]
+store_path = "/nix/store/djfaasm1z788lx2qbrg8z658smskbxg9-mdbook-0.5.4"
+source = "hydra"
+
+[packages.aarch64-linux.openssl]
+store_path = "/nix/store/39xal23hc5zb3w1m40d7kjz1z4sdpdnp-openssl-3.5.9"
+source = "hydra"
+
+[packages.aarch64-linux."openssl.dev"]
+store_path = "/nix/store/8xjxipkd0crzb8fg0w5al4f5ixaywmnp-openssl-3.5.9-dev"
+source = "nix-eval"
+
+[packages.aarch64-linux.pkg-config]
+store_path = "/nix/store/mxhdqj87yk1yg6l8kmhp53f4s5zjryjx-pkg-config-wrapper-0.29.2"
+source = "hydra"
+
+[packages.aarch64-linux.rust-analyzer]
+store_path = "/nix/store/rcqd6l3wcf8mj2m7wx1sl6205f9s0s4k-rust-analyzer-2026-11-16"
+source = "hydra"
+
+[packages.aarch64-linux.rustc]
+store_path = "/nix/store/h3nqqi2fyg3lfvqmc4rpaba3yclg8yhc-rustc-wrapper-1.99.1"
+source = "hydra"
+
+[packages.aarch64-linux.rustfmt]
+store_path = "/nix/store/3kwbkpa78n501fiic8sl5d08fxkm96a3-rustfmt-1.99.1"
+source = "hydra"
+
+[packages.aarch64-linux.sqlite]
+store_path = "/nix/store/4yv62kymda63nmnsc762inf3ahv1blcm-sqlite-3.54.0"
+source = "hydra"
+
+[packages.aarch64-linux."sqlite.dev"]
+store_path = "/nix/store/9m2girzx2md4ay78j1718xzd7m99cnjf-sqlite-3.54.0-dev"
+source = "nix-eval"
+
+[packages.aarch64-linux.xz]
+store_path = "/nix/store/2g0x1888rirw32hwnla2shi3g1qjw0ha-xz-5.8.4"
+source = "hydra"
+
+[packages.aarch64-linux."xz.dev"]
+store_path = "/nix/store/3580z5y5bsv6xrswnp5q9b50cljy5dfv-xz-5.8.4-dev"
+source = "nix-eval"
+
+[packages.aarch64-linux.zstd]
+store_path = "/nix/store/slm8pf427mw8j69m7lr0jisvrvin0qfm-zstd-1.5.7"
+source = "hydra"
+
+[packages.aarch64-linux."zstd.dev"]
+store_path = "/nix/store/lpvznd2pkk6vn2wrf0p33zbdcyh2finx-zstd-1.5.7-dev"
+source = "nix-eval"
