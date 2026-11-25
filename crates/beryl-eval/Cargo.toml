@@ -6,4 +6,14 @@ edition.workspace = true
 [dependencies]
 beryl-index.workspace = true
 beryl-nix.workspace = true
+beryl-store.workspace = true
+bstr.workspace = true
+hex.workspace = true
+mlua.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
