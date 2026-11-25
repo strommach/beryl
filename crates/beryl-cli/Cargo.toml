@@ -16,6 +16,7 @@ beryl-nix.workspace = true
 beryl-store.workspace = true
 clap.workspace = true
 hex.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

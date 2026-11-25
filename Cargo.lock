@@ -137,6 +137,7 @@ version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "beryl-eval",
+ "beryl-index",
  "beryl-nix",
  "beryl-store",
  "hex",
@@ -161,6 +162,7 @@ dependencies = [
  "beryl-store",
  "clap",
  "hex",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

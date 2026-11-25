@@ -1,10 +1,12 @@
+mod develop;
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Mutex};
 
 use beryl_build::{Builder, SandboxMode, realise_eval_via_daemon};
-use beryl_eval::{EvalError, EvalResult, Evaluator, NixpkgsLookup};
+use beryl_eval::{EvalError, EvalResult, Evaluator, NixpkgsLookup, ProjectManifest};
 use beryl_index::{HydraConfig, Lockfile, NixpkgsResolver, current_system};
 use beryl_nix::narinfo_ext::parse_verifying_key;
 use beryl_nix::store_path::StorePath;
@@ -111,6 +113,24 @@ enum Commands {
     },
     /// Build/fetch a package (`nixpkgs#<attr>`, `/nix/store/...`, or `./pkg.lua`) and link into active profile
     Install { target: String },
+    /// Enter a project dev shell defined in `beryl.lua`
+    Develop {
+        /// Shell name inside `shells = { ... }` (defaults to `default`)
+        #[arg(default_value = "default")]
+        shell: String,
+
+        /// Path to project manifest
+        #[arg(long, short = 'f', default_value = "beryl.lua")]
+        file: PathBuf,
+
+        /// Print POSIX `export ...` lines instead of spawning a shell (great for `direnv`)
+        #[arg(long)]
+        export: bool,
+
+        /// Run a single command inside the dev shell instead of an interactive shell
+        #[arg(long, short = 'c')]
+        command: Option<String>,
+    },
     /// Spawn a subshell with requested store paths on PATH/CPATH/LIBRARY_PATH/LDFLAGS
     Shell {
         /// Packages to include (`ripgrep`, `nixpkgs#ripgrep`, or `/nix/store/...`)
@@ -198,6 +218,51 @@ async fn eval_pkg_lua(
         .save(&cli.lockfile)?;
 
     Ok(res)
+}
+
+async fn eval_project_lua(
+    cli: &Cli,
+    system: &str,
+    path: PathBuf,
+    client: BinaryCacheClient,
+) -> anyhow::Result<ProjectManifest> {
+    let resolver = NixpkgsResolver::new(HydraConfig::default(), client)?;
+    let lockfile = Arc::new(Mutex::new(Lockfile::load_or_default(&cli.lockfile)?));
+    let handle = tokio::runtime::Handle::current();
+
+    struct CliLookup {
+        resolver: NixpkgsResolver,
+        lockfile: Arc<Mutex<Lockfile>>,
+        handle: tokio::runtime::Handle,
+    }
+
+    impl NixpkgsLookup for CliLookup {
+        fn resolve_nixpkgs(&self, system: &str, attr: &str) -> beryl_eval::Result<StorePath> {
+            let mut lf = self.lockfile.lock().expect("lockfile mutex poisoned");
+            self.handle
+                .block_on(self.resolver.resolve(&mut lf, system, attr))
+                .map_err(EvalError::from)
+        }
+    }
+
+    let lookup = Arc::new(CliLookup {
+        resolver,
+        lockfile: Arc::clone(&lockfile),
+        handle,
+    });
+    let eval_system = system.to_string();
+    let manifest = tokio::task::spawn_blocking(move || {
+        let evaluator = Evaluator::new(eval_system, lookup);
+        evaluator.eval_project_file(&path)
+    })
+    .await??;
+
+    lockfile
+        .lock()
+        .expect("lockfile mutex poisoned")
+        .save(&cli.lockfile)?;
+
+    Ok(manifest)
 }
 
 #[tokio::main]
@@ -376,6 +441,40 @@ async fn main() -> anyhow::Result<()> {
                     gen_num,
                     profile.active_link().display()
                 );
+            }
+            Ok(())
+        }
+        Commands::Develop {
+            shell,
+            file,
+            export,
+            command,
+        } => {
+            let client = build_cache_client(&cli)?;
+            let manifest = eval_project_lua(&cli, &system, file.clone(), client.clone()).await?;
+            let shell_spec = manifest.shells.get(shell).ok_or_else(|| {
+                let available: Vec<&str> = manifest.shells.keys().map(String::as_str).collect();
+                anyhow::anyhow!(
+                    "shell '{shell}' not found in {} (available: {:?})",
+                    file.display(),
+                    available
+                )
+            })?;
+
+            let env = develop::prepare_dev_shell(
+                &manifest,
+                shell_spec,
+                cli.daemon,
+                &cli.daemon_socket,
+                &cli.store,
+                client,
+            )
+            .await?;
+
+            if *export {
+                develop::print_export_script(&env);
+            } else {
+                develop::spawn_dev_shell(&env, command.as_deref())?;
             }
             Ok(())
         }
