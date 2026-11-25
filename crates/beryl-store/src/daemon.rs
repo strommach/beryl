@@ -24,6 +24,10 @@ const WORKER_MAGIC_2: u64 = 0x6478_696f; // "dxio"
 const CLIENT_PROTOCOL_VERSION: u64 = (1 << 8) | 35; // 1.35
 
 const OP_IS_VALID_PATH: u64 = 1;
+const OP_ADD_TEXT_TO_STORE: u64 = 8;
+const OP_BUILD_PATHS: u64 = 9;
+const OP_ENSURE_PATH: u64 = 10;
+const OP_ADD_INDIRECT_ROOT: u64 = 12;
 const OP_QUERY_PATH_INFO: u64 = 26;
 const OP_ADD_TO_STORE_NAR: u64 = 39;
 
@@ -126,6 +130,75 @@ impl DaemonStore {
     /// Daemon's reported Nix version string, if advertised.
     pub async fn daemon_version(&self) -> Option<String> {
         self.conn.lock().await.daemon_version.clone()
+    }
+
+    /// Ask `nix-daemon` to ensure `path` is present in `/nix/store` (substituting from
+    /// configured binary caches if necessary).
+    pub async fn ensure_path(&self, path: &StorePath) -> Result<()> {
+        let mut guard = self.conn.lock().await;
+        let proto = guard.protocol_version;
+        write_u64(&mut guard.stream, OP_ENSURE_PATH).await?;
+        write_string(&mut guard.stream, &path.to_absolute_path()).await?;
+        guard.stream.flush().await?;
+
+        process_stderr(&mut guard.stream, proto).await?;
+        let _ok = read_u64(&mut guard.stream).await?;
+        Ok(())
+    }
+
+    /// Add a text file (such as an ATerm `.drv`) to `/nix/store` via `nix-daemon`.
+    ///
+    /// `suffix` is the store path name (e.g. `"hello-1.0.drv"`).
+    /// Returns the resulting `StorePath` registered by the daemon.
+    pub async fn add_text_to_store(
+        &self,
+        suffix: &str,
+        contents: &str,
+        references: &BTreeSet<StorePath>,
+    ) -> Result<StorePath> {
+        let mut guard = self.conn.lock().await;
+        let proto = guard.protocol_version;
+        let refs: Vec<String> = references.iter().map(|r| r.to_absolute_path()).collect();
+
+        write_u64(&mut guard.stream, OP_ADD_TEXT_TO_STORE).await?;
+        write_string(&mut guard.stream, suffix).await?;
+        write_string(&mut guard.stream, contents).await?;
+        write_string_list(&mut guard.stream, &refs).await?;
+        guard.stream.flush().await?;
+
+        process_stderr(&mut guard.stream, proto).await?;
+        let raw_path = read_string(&mut guard.stream).await?;
+        Ok(parse_store_path(&raw_path)?)
+    }
+
+    /// Ask `nix-daemon` to build one or more derived paths (e.g. `"/nix/store/...-foo.drv!out"`).
+    pub async fn build_paths(&self, derived_paths: &[String]) -> Result<()> {
+        let mut guard = self.conn.lock().await;
+        let proto = guard.protocol_version;
+
+        write_u64(&mut guard.stream, OP_BUILD_PATHS).await?;
+        write_string_list(&mut guard.stream, derived_paths).await?;
+        write_u64(&mut guard.stream, 0).await?; // BuildMode::Normal
+        guard.stream.flush().await?;
+
+        process_stderr(&mut guard.stream, proto).await?;
+        let _ok = read_u64(&mut guard.stream).await?;
+        Ok(())
+    }
+
+    /// Register an indirect GC root symlink (e.g. a user profile generation link) with
+    /// `nix-daemon` so `nix-collect-garbage` preserves the referenced store closure.
+    pub async fn add_indirect_root(&self, symlink_path: &Path) -> Result<()> {
+        let mut guard = self.conn.lock().await;
+        let proto = guard.protocol_version;
+
+        write_u64(&mut guard.stream, OP_ADD_INDIRECT_ROOT).await?;
+        write_string(&mut guard.stream, &symlink_path.display().to_string()).await?;
+        guard.stream.flush().await?;
+
+        process_stderr(&mut guard.stream, proto).await?;
+        let _ok = read_u64(&mut guard.stream).await?;
+        Ok(())
     }
 }
 
