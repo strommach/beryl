@@ -3,15 +3,15 @@ use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Mutex};
 
-use beryl_build::{Builder, SandboxMode};
+use beryl_build::{Builder, SandboxMode, realise_eval_via_daemon};
 use beryl_eval::{EvalError, EvalResult, Evaluator, NixpkgsLookup};
 use beryl_index::{HydraConfig, Lockfile, NixpkgsResolver, current_system};
 use beryl_nix::narinfo_ext::parse_verifying_key;
 use beryl_nix::store_path::StorePath;
 use beryl_nix::store_path_ext::parse_store_path;
 use beryl_store::{
-    BinaryCacheClient, BinaryCacheConfig, DEFAULT_DAEMON_SOCKET, DaemonStore, LocalStore,
-    ProfileManager, Store, collect_garbage,
+    BinaryCacheClient, BinaryCacheConfig, DEFAULT_DAEMON_SOCKET, DaemonProfileManager, DaemonStore,
+    LocalStore, ProfileManager, Store, collect_garbage,
 };
 use clap::{Parser, Subcommand};
 
@@ -320,33 +320,63 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Install { target } => {
-            let store = LocalStore::open(&cli.store)?;
             let client = build_cache_client(&cli)?;
 
-            let sp = if target.ends_with(".lua") {
-                let eval_res =
-                    eval_pkg_lua(&cli, &system, PathBuf::from(target), client.clone()).await?;
-                let builder = Builder::new(store.clone(), Some(client));
-                builder.realise_eval(&eval_res).await?
+            if cli.daemon {
+                let daemon = DaemonStore::connect(&cli.daemon_socket).await?;
+                let sp = if target.ends_with(".lua") {
+                    let eval_res =
+                        eval_pkg_lua(&cli, &system, PathBuf::from(target), client).await?;
+                    realise_eval_via_daemon(&daemon, &eval_res).await?
+                } else {
+                    let resolver = NixpkgsResolver::new(HydraConfig::default(), client.clone())?;
+                    let mut lockfile = Lockfile::load_or_default(&cli.lockfile)?;
+                    let sp = resolve_target(target, &system, &resolver, &mut lockfile).await?;
+                    lockfile.save(&cli.lockfile)?;
+                    if !daemon.has_path(&sp).await? {
+                        daemon.ensure_path(&sp).await?;
+                    }
+                    sp
+                };
+
+                let profiles_dir = default_user_profiles_dir();
+                let profile = DaemonProfileManager::new(daemon, profiles_dir, &cli.profile)?;
+                let gen_num = profile.install(&sp).await?;
+
+                println!(
+                    "installed {} (daemon) -> profile '{}' generation {} ({})",
+                    sp.to_absolute_path(),
+                    cli.profile,
+                    gen_num,
+                    profile.active_link().display()
+                );
             } else {
-                let resolver = NixpkgsResolver::new(HydraConfig::default(), client.clone())?;
-                let mut lockfile = Lockfile::load_or_default(&cli.lockfile)?;
-                let sp = resolve_target(target, &system, &resolver, &mut lockfile).await?;
-                lockfile.save(&cli.lockfile)?;
-                client.fetch_closure(&store, &sp).await?;
-                sp
-            };
+                let store = LocalStore::open(&cli.store)?;
+                let sp = if target.ends_with(".lua") {
+                    let eval_res =
+                        eval_pkg_lua(&cli, &system, PathBuf::from(target), client.clone()).await?;
+                    let builder = Builder::new(store.clone(), Some(client));
+                    builder.realise_eval(&eval_res).await?
+                } else {
+                    let resolver = NixpkgsResolver::new(HydraConfig::default(), client.clone())?;
+                    let mut lockfile = Lockfile::load_or_default(&cli.lockfile)?;
+                    let sp = resolve_target(target, &system, &resolver, &mut lockfile).await?;
+                    lockfile.save(&cli.lockfile)?;
+                    client.fetch_closure(&store, &sp).await?;
+                    sp
+                };
 
-            let profile = ProfileManager::new(store.clone(), &cli.profile)?;
-            let gen_num = profile.install(&sp).await?;
+                let profile = ProfileManager::new(store.clone(), &cli.profile)?;
+                let gen_num = profile.install(&sp).await?;
 
-            println!(
-                "installed {} -> profile '{}' generation {} ({})",
-                sp.to_absolute_path(),
-                cli.profile,
-                gen_num,
-                profile.active_link().display()
-            );
+                println!(
+                    "installed {} -> profile '{}' generation {} ({})",
+                    sp.to_absolute_path(),
+                    cli.profile,
+                    gen_num,
+                    profile.active_link().display()
+                );
+            }
             Ok(())
         }
         Commands::Shell { packages, command } => {
@@ -425,15 +455,28 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Rollback => {
-            let store = LocalStore::open(&cli.store)?;
-            let profile = ProfileManager::new(store, &cli.profile)?;
-            let gen_num = profile.rollback()?;
-            println!(
-                "rolled back profile '{}' to generation {} ({})",
-                cli.profile,
-                gen_num,
-                profile.active_link().display()
-            );
+            if cli.daemon {
+                let daemon = DaemonStore::connect(&cli.daemon_socket).await?;
+                let profile =
+                    DaemonProfileManager::new(daemon, default_user_profiles_dir(), &cli.profile)?;
+                let gen_num = profile.rollback()?;
+                println!(
+                    "rolled back daemon profile '{}' to generation {} ({})",
+                    cli.profile,
+                    gen_num,
+                    profile.active_link().display()
+                );
+            } else {
+                let store = LocalStore::open(&cli.store)?;
+                let profile = ProfileManager::new(store, &cli.profile)?;
+                let gen_num = profile.rollback()?;
+                println!(
+                    "rolled back profile '{}' to generation {} ({})",
+                    cli.profile,
+                    gen_num,
+                    profile.active_link().display()
+                );
+            }
             Ok(())
         }
         Commands::Gc => {
@@ -468,26 +511,50 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Build { path, no_sandbox } => {
-            let store = LocalStore::open(&cli.store)?;
             let client = build_cache_client(&cli)?;
             let eval_res = eval_pkg_lua(&cli, &system, path.clone(), client.clone()).await?;
 
-            let sandbox = if *no_sandbox {
-                SandboxMode::Disabled
+            if cli.daemon {
+                let daemon = DaemonStore::connect(&cli.daemon_socket).await?;
+                let out_path = realise_eval_via_daemon(&daemon, &eval_res).await?;
+                println!(
+                    "built (daemon) {} -> {}",
+                    out_path.to_absolute_path(),
+                    daemon.real_path(&out_path).display()
+                );
             } else {
-                SandboxMode::Auto
-            };
-            let builder = Builder::new(store.clone(), Some(client)).with_sandbox(sandbox);
-            let out_path = builder.realise_eval(&eval_res).await?;
+                let store = LocalStore::open(&cli.store)?;
+                let sandbox = if *no_sandbox {
+                    SandboxMode::Disabled
+                } else {
+                    SandboxMode::Auto
+                };
+                let builder = Builder::new(store.clone(), Some(client)).with_sandbox(sandbox);
+                let out_path = builder.realise_eval(&eval_res).await?;
 
-            println!(
-                "built {} -> {}",
-                out_path.to_absolute_path(),
-                store.real_path(&out_path).display()
-            );
+                println!(
+                    "built {} -> {}",
+                    out_path.to_absolute_path(),
+                    store.real_path(&out_path).display()
+                );
+            }
             Ok(())
         }
     }
+}
+
+fn default_user_profiles_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("beryl/profiles");
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home).join(".local/state/beryl/profiles");
+    }
+    PathBuf::from("/tmp/beryl-profiles")
 }
 
 fn prepend_env_paths(var: &str, dirs: &[PathBuf]) -> OsString {

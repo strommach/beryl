@@ -13,6 +13,7 @@ use beryl_nix::store_path_ext::parse_store_path;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+use crate::daemon::DaemonStore;
 use crate::error::{Result, StoreError};
 use crate::local::LocalStore;
 use crate::store::{Store, ValidPathInfo};
@@ -253,6 +254,166 @@ fn merge_symlink_tree(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// User-space profile manager for `--daemon` mode.
+///
+/// Stores profile generations under a user-writable directory (e.g.
+/// `~/.local/state/beryl/profiles/`) and registers indirect GC roots with
+/// `nix-daemon` via `AddIndirectRoot` so `nix-collect-garbage` preserves them.
+#[derive(Clone)]
+pub struct DaemonProfileManager {
+    daemon: DaemonStore,
+    profiles_dir: PathBuf,
+    name: String,
+}
+
+impl DaemonProfileManager {
+    pub fn new(
+        daemon: DaemonStore,
+        profiles_dir: impl Into<PathBuf>,
+        name: impl Into<String>,
+    ) -> Result<Self> {
+        let profiles_dir = profiles_dir.into();
+        fs::create_dir_all(&profiles_dir)?;
+        fs::create_dir_all(profiles_dir.join(".gcroots"))?;
+        Ok(Self {
+            daemon,
+            profiles_dir,
+            name: name.into(),
+        })
+    }
+
+    pub fn active_link(&self) -> PathBuf {
+        self.profiles_dir.join(&self.name)
+    }
+
+    pub fn generation_link(&self, gen_num: u64) -> PathBuf {
+        self.profiles_dir
+            .join(format!("{}-{gen_num}-link", self.name))
+    }
+
+    pub fn list_generations(&self) -> Result<Vec<u64>> {
+        let prefix = format!("{}-", self.name);
+        let suffix = "-link";
+        let mut gens = Vec::new();
+        for entry in fs::read_dir(&self.profiles_dir)? {
+            let entry = entry?;
+            let fname = entry.file_name();
+            let Some(name_str) = fname.to_str() else {
+                continue;
+            };
+            if let Some(rest) = name_str.strip_prefix(&prefix)
+                && let Some(num_str) = rest.strip_suffix(suffix)
+                && let Ok(num) = num_str.parse::<u64>()
+            {
+                gens.push(num);
+            }
+        }
+        gens.sort_unstable();
+        Ok(gens)
+    }
+
+    pub fn current_generation(&self) -> Result<Option<u64>> {
+        let active = self.active_link();
+        if !active.is_symlink() {
+            return Ok(None);
+        }
+        let target = fs::read_link(&active)?;
+        let Some(fname) = target.file_name().and_then(|s| s.to_str()) else {
+            return Ok(None);
+        };
+        let prefix = format!("{}-", self.name);
+        let suffix = "-link";
+        Ok(fname
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .and_then(|num| num.parse::<u64>().ok()))
+    }
+
+    pub fn installed_paths(&self) -> Result<BTreeSet<StorePath>> {
+        let active = self.active_link();
+        if !active.is_symlink() {
+            return Ok(BTreeSet::new());
+        }
+        let manifest_path = active.join(MANIFEST_FILENAME);
+        if !manifest_path.exists() {
+            return Ok(BTreeSet::new());
+        }
+        let text = fs::read_to_string(&manifest_path)?;
+        let manifest: ProfileManifest = serde_json::from_str(&text)?;
+        let mut set = BTreeSet::new();
+        for raw in manifest.paths {
+            set.insert(parse_store_path(&raw)?);
+        }
+        Ok(set)
+    }
+
+    /// Install `path` into this user-space daemon profile and register a `nix-daemon`
+    /// indirect GC root for it.
+    pub async fn install(&self, path: &StorePath) -> Result<u64> {
+        if !self.daemon.has_path(path).await? {
+            return Err(StoreError::NotFound(path.to_absolute_path()));
+        }
+
+        let mut paths = self.installed_paths()?;
+        paths.insert(path.clone());
+
+        let next_gen = self.list_generations()?.into_iter().max().unwrap_or(0) + 1;
+        let env_dir = self
+            .profiles_dir
+            .join(format!("{}-{next_gen}-env", self.name));
+        fs::create_dir_all(&env_dir)?;
+
+        let manifest = ProfileManifest {
+            paths: paths.iter().map(|p| p.to_absolute_path()).collect(),
+        };
+        fs::write(
+            env_dir.join(MANIFEST_FILENAME),
+            serde_json::to_string_pretty(&manifest)?,
+        )?;
+
+        for sp in &paths {
+            let real = self.daemon.real_path(sp);
+            if real.is_dir() {
+                merge_symlink_tree(&real, &env_dir)?;
+            }
+            // Register indirect GC root symlink pointing directly into `/nix/store/<path>`
+            let gcroot_link = self.profiles_dir.join(".gcroots").join(sp.to_string());
+            atomic_symlink(&real, &gcroot_link)?;
+            self.daemon.add_indirect_root(&gcroot_link).await?;
+        }
+
+        let gen_link = self.generation_link(next_gen);
+        let env_name = env_dir.file_name().expect("env dir has name");
+        atomic_symlink(Path::new(env_name), &gen_link)?;
+
+        let gen_name = gen_link.file_name().expect("gen link has name");
+        atomic_symlink(Path::new(gen_name), &self.active_link())?;
+
+        info!(
+            profile = %self.name,
+            generation = next_gen,
+            "switched daemon profile generation"
+        );
+        Ok(next_gen)
+    }
+
+    pub fn rollback(&self) -> Result<u64> {
+        let current = self
+            .current_generation()?
+            .ok_or_else(|| StoreError::NoPreviousGeneration(self.name.clone()))?;
+        let gens = self.list_generations()?;
+        let prev = gens
+            .into_iter()
+            .rev()
+            .find(|&g| g < current)
+            .ok_or_else(|| StoreError::NoPreviousGeneration(self.name.clone()))?;
+
+        let target_name = format!("{}-{prev}-link", self.name);
+        atomic_symlink(Path::new(&target_name), &self.active_link())?;
+        Ok(prev)
+    }
 }
 
 /// Atomically create or replace a symlink at `link_path` pointing to `target`.

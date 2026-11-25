@@ -13,5 +13,5 @@ pub use daemon::{DEFAULT_DAEMON_SOCKET, DaemonStore};
 pub use error::{Result, StoreError};
 pub use gc::{GcReport, collect_garbage, collect_gc_roots};
 pub use local::LocalStore;
-pub use profile::ProfileManager;
+pub use profile::{DaemonProfileManager, ProfileManager};
 pub use store::{Store, ValidPathInfo};
