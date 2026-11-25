@@ -47,6 +47,9 @@ pub enum StoreError {
     #[error("no previous generation available for profile '{0}'")]
     NoPreviousGeneration(String),
 
+    #[error("nix-daemon error: {0}")]
+    Daemon(String),
+
     #[error("task join error: {0}")]
     Join(String),
 }
