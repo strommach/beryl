@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Mutex};
 
-use beryl_eval::{EvalError, Evaluator, NixpkgsLookup};
+use beryl_build::{Builder, SandboxMode};
+use beryl_eval::{EvalError, EvalResult, Evaluator, NixpkgsLookup};
 use beryl_index::{HydraConfig, Lockfile, NixpkgsResolver, current_system};
 use beryl_nix::narinfo_ext::parse_verifying_key;
 use beryl_nix::store_path::StorePath;
@@ -82,7 +83,13 @@ enum Commands {
         aterm: bool,
     },
     /// Evaluate a pkg.lua, fetch substitutes, and build into the store
-    Build { path: String },
+    Build {
+        /// Path to `pkg.lua`
+        path: PathBuf,
+        /// Disable Linux namespace sandboxing (still uses stripped env & isolated build dir)
+        #[arg(long)]
+        no_sandbox: bool,
+    },
     /// Build/fetch a package (`nixpkgs#<attr>`, `/nix/store/...`, or `./pkg.lua`) and link into active profile
     Install { target: String },
     /// Spawn a subshell with requested store paths on PATH/CPATH/LIBRARY_PATH/LDFLAGS
@@ -127,6 +134,51 @@ async fn resolve_target(
     }
     let attr = strip_nixpkgs_prefix(target);
     Ok(resolver.resolve(lockfile, system, attr).await?)
+}
+
+async fn eval_pkg_lua(
+    cli: &Cli,
+    system: &str,
+    path: PathBuf,
+    client: BinaryCacheClient,
+) -> anyhow::Result<EvalResult> {
+    let resolver = NixpkgsResolver::new(HydraConfig::default(), client)?;
+    let lockfile = Arc::new(Mutex::new(Lockfile::load_or_default(&cli.lockfile)?));
+    let handle = tokio::runtime::Handle::current();
+
+    struct CliLookup {
+        resolver: NixpkgsResolver,
+        lockfile: Arc<Mutex<Lockfile>>,
+        handle: tokio::runtime::Handle,
+    }
+
+    impl NixpkgsLookup for CliLookup {
+        fn resolve_nixpkgs(&self, system: &str, attr: &str) -> beryl_eval::Result<StorePath> {
+            let mut lf = self.lockfile.lock().expect("lockfile mutex poisoned");
+            self.handle
+                .block_on(self.resolver.resolve(&mut lf, system, attr))
+                .map_err(EvalError::from)
+        }
+    }
+
+    let lookup = Arc::new(CliLookup {
+        resolver,
+        lockfile: Arc::clone(&lockfile),
+        handle,
+    });
+    let eval_system = system.to_string();
+    let res = tokio::task::spawn_blocking(move || {
+        let evaluator = Evaluator::new(eval_system, lookup);
+        evaluator.eval_file(&path)
+    })
+    .await??;
+
+    lockfile
+        .lock()
+        .expect("lockfile mutex poisoned")
+        .save(&cli.lockfile)?;
+
+    Ok(res)
 }
 
 #[tokio::main]
@@ -205,28 +257,29 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Install { target } => {
-            if target.ends_with(".lua") {
-                anyhow::bail!(
-                    "`beryl install {target}` (Lua package builds) will be wired in Phase 4/5"
-                );
-            }
-
             let store = LocalStore::open(&cli.store)?;
             let client = build_cache_client(&cli)?;
-            let resolver = NixpkgsResolver::new(HydraConfig::default(), client.clone())?;
-            let mut lockfile = Lockfile::load_or_default(&cli.lockfile)?;
 
-            let sp = resolve_target(target, &system, &resolver, &mut lockfile).await?;
-            lockfile.save(&cli.lockfile)?;
+            let sp = if target.ends_with(".lua") {
+                let eval_res =
+                    eval_pkg_lua(&cli, &system, PathBuf::from(target), client.clone()).await?;
+                let builder = Builder::new(store.clone(), Some(client));
+                builder.realise_eval(&eval_res).await?
+            } else {
+                let resolver = NixpkgsResolver::new(HydraConfig::default(), client.clone())?;
+                let mut lockfile = Lockfile::load_or_default(&cli.lockfile)?;
+                let sp = resolve_target(target, &system, &resolver, &mut lockfile).await?;
+                lockfile.save(&cli.lockfile)?;
+                client.fetch_closure(&store, &sp).await?;
+                sp
+            };
 
-            let newly_fetched = client.fetch_closure(&store, &sp).await?;
             let profile = ProfileManager::new(store.clone(), &cli.profile)?;
             let gen_num = profile.install(&sp).await?;
 
             println!(
-                "installed {} (fetched {} new paths) -> profile '{}' generation {} ({})",
+                "installed {} -> profile '{}' generation {} ({})",
                 sp.to_absolute_path(),
-                newly_fetched.len(),
                 cli.profile,
                 gen_num,
                 profile.active_link().display()
@@ -333,42 +386,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Eval { path, write, aterm } => {
             let client = build_cache_client(&cli)?;
-            let resolver = NixpkgsResolver::new(HydraConfig::default(), client)?;
-            let lockfile = Arc::new(Mutex::new(Lockfile::load_or_default(&cli.lockfile)?));
-            let handle = tokio::runtime::Handle::current();
-
-            struct CliLookup {
-                resolver: NixpkgsResolver,
-                lockfile: Arc<Mutex<Lockfile>>,
-                handle: tokio::runtime::Handle,
-            }
-
-            impl NixpkgsLookup for CliLookup {
-                fn resolve_nixpkgs(&self, system: &str, attr: &str) -> beryl_eval::Result<StorePath> {
-                    let mut lf = self.lockfile.lock().expect("lockfile mutex poisoned");
-                    self.handle
-                        .block_on(self.resolver.resolve(&mut lf, system, attr))
-                        .map_err(EvalError::from)
-                }
-            }
-
-            let lookup = Arc::new(CliLookup {
-                resolver,
-                lockfile: Arc::clone(&lockfile),
-                handle,
-            });
-            let path = path.clone();
-            let eval_system = system.clone();
-            let res = tokio::task::spawn_blocking(move || {
-                let evaluator = Evaluator::new(eval_system, lookup);
-                evaluator.eval_file(&path)
-            })
-            .await??;
-
-            lockfile
-                .lock()
-                .expect("lockfile mutex poisoned")
-                .save(&cli.lockfile)?;
+            let res = eval_pkg_lua(&cli, &system, path.clone(), client).await?;
 
             if *write {
                 let store = LocalStore::open(&cli.store)?;
@@ -386,7 +404,26 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Commands::Build { path } => anyhow::bail!("`beryl build {path}` is not implemented yet"),
+        Commands::Build { path, no_sandbox } => {
+            let store = LocalStore::open(&cli.store)?;
+            let client = build_cache_client(&cli)?;
+            let eval_res = eval_pkg_lua(&cli, &system, path.clone(), client.clone()).await?;
+
+            let sandbox = if *no_sandbox {
+                SandboxMode::Disabled
+            } else {
+                SandboxMode::Auto
+            };
+            let builder = Builder::new(store.clone(), Some(client)).with_sandbox(sandbox);
+            let out_path = builder.realise_eval(&eval_res).await?;
+
+            println!(
+                "built {} -> {}",
+                out_path.to_absolute_path(),
+                store.real_path(&out_path).display()
+            );
+            Ok(())
+        }
     }
 }
 
