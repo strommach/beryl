@@ -1,0 +1,11 @@
+[package]
+name = "beryl-build"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+beryl-nix.workspace = true
+beryl-store.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

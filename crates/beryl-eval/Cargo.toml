@@ -1,0 +1,9 @@
+[package]
+name = "beryl-eval"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+beryl-index.workspace = true
+beryl-nix.workspace = true
+thiserror.workspace = true

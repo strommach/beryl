@@ -1,0 +1,20 @@
+[package]
+name = "beryl-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "beryl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+beryl-build.workspace = true
+beryl-eval.workspace = true
+beryl-index.workspace = true
+beryl-nix.workspace = true
+beryl-store.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
