@@ -172,10 +172,15 @@ name = "beryl-index"
 version = "0.1.0"
 dependencies = [
  "beryl-nix",
+ "beryl-store",
+ "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
+ "tokio",
  "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -197,6 +202,8 @@ dependencies = [
  "hex",
  "reqwest",
  "rusqlite",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror",

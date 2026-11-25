@@ -117,6 +117,63 @@ impl LocalStore {
         Ok(out)
     }
 
+    /// Remove a set of dead (unreferenced) store paths from SQLite and disk.
+    ///
+    /// Returns `(deleted_paths, freed_bytes)`.
+    pub fn delete_dead_paths(&self, dead: &[StorePath]) -> Result<(Vec<StorePath>, u64)> {
+        if dead.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+
+        let mut freed_bytes = 0u64;
+        {
+            let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
+            // Temporarily disable FK checks within the atomic transaction because dead paths
+            // may reference other dead paths in arbitrary order.
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+            let tx = conn.transaction()?;
+
+            for path in dead {
+                let abs = path.to_absolute_path();
+                if let Some((id, nar_size)) = tx
+                    .query_row(
+                        "SELECT id, COALESCE(narSize, 0) FROM ValidPaths WHERE path = ?1",
+                        params![abs],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .optional()?
+                {
+                    freed_bytes += nar_size.max(0) as u64;
+                    tx.execute(
+                        "DELETE FROM Refs WHERE referrer = ?1 OR reference = ?1",
+                        params![id],
+                    )?;
+                    tx.execute("DELETE FROM DerivationOutputs WHERE drv = ?1", params![id])?;
+                    tx.execute("DELETE FROM ValidPaths WHERE id = ?1", params![id])?;
+                }
+            }
+
+            tx.commit()?;
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+        }
+
+        let mut deleted = Vec::with_capacity(dead.len());
+        for path in dead {
+            let real = self.real_path(path);
+            if real.exists() || real.is_symlink() {
+                make_writable_recursive(&real)?;
+                if real.is_dir() && !real.is_symlink() {
+                    fs::remove_dir_all(&real)?;
+                } else {
+                    fs::remove_file(&real)?;
+                }
+            }
+            deleted.push(path.clone());
+        }
+
+        Ok((deleted, freed_bytes))
+    }
+
     fn has_path_sync(&self, path: &StorePath) -> Result<bool> {
         let abs = path.to_absolute_path();
         let conn = self.conn.lock().expect("sqlite mutex poisoned");

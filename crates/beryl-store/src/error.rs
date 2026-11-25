@@ -15,6 +15,9 @@ pub enum StoreError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
     #[error("store path not found: {0}")]
     NotFound(String),
 
@@ -40,6 +43,9 @@ pub enum StoreError {
 
     #[error("missing reference '{reference}' required by '{referrer}'")]
     MissingReference { referrer: String, reference: String },
+
+    #[error("no previous generation available for profile '{0}'")]
+    NoPreviousGeneration(String),
 
     #[error("task join error: {0}")]
     Join(String),
