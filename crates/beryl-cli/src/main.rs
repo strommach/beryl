@@ -87,11 +87,23 @@ enum Commands {
     Lock {
         /// Attribute names (e.g. `ripgrep` or `nixpkgs#ripgrep`)
         attrs: Vec<String>,
+        /// Set the nixpkgs channel in `beryl.lock` (e.g. `nixos-unstable`, `nixos-25.05`)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Pin a specific nixpkgs git commit in `beryl.lock` (resolved via Tier 3 `nix eval`)
+        #[arg(long)]
+        rev: Option<String>,
     },
     /// Refresh pinned nixpkgs attributes in `beryl.lock`
     Update {
         /// Specific attributes to refresh (defaults to all pinned packages for the current system)
         attrs: Vec<String>,
+        /// Switch the nixpkgs channel in `beryl.lock` (e.g. `nixos-unstable`, `nixos-25.05`)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Pin a specific nixpkgs git commit in `beryl.lock` (clears rev if only `--channel` is given)
+        #[arg(long)]
+        rev: Option<String>,
     },
     /// Evaluate a pkg.lua into Nix ATerm `.drv` files
     Eval {
@@ -369,23 +381,55 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Commands::Lock { attrs } => {
+        Commands::Lock {
+            attrs,
+            channel,
+            rev,
+        } => {
             let client = build_cache_client(&cli)?;
             let resolver = NixpkgsResolver::new(HydraConfig::default(), client)?;
             let mut lockfile = Lockfile::load_or_default(&cli.lockfile)?;
 
+            if let Some(ch) = channel {
+                lockfile.nixpkgs.channel = ch.clone();
+                if rev.is_none() {
+                    lockfile.nixpkgs.rev = None;
+                }
+            }
+            if let Some(r) = rev {
+                lockfile.nixpkgs.rev = Some(r.clone());
+            }
+
             for raw in attrs {
                 let attr = strip_nixpkgs_prefix(raw);
                 let sp = resolver.resolve(&mut lockfile, &system, attr).await?;
-                println!("locked {attr} ({system}) -> {}", sp.to_absolute_path());
+                println!(
+                    "locked {attr} ({system}, {}) -> {}",
+                    lockfile.nixpkgs.channel,
+                    sp.to_absolute_path()
+                );
             }
             lockfile.save(&cli.lockfile)?;
             Ok(())
         }
-        Commands::Update { attrs } => {
+        Commands::Update {
+            attrs,
+            channel,
+            rev,
+        } => {
             let client = build_cache_client(&cli)?;
             let resolver = NixpkgsResolver::new(HydraConfig::default(), client)?;
             let mut lockfile = Lockfile::load_or_default(&cli.lockfile)?;
+
+            if let Some(ch) = channel {
+                lockfile.nixpkgs.channel = ch.clone();
+                if rev.is_none() {
+                    lockfile.nixpkgs.rev = None;
+                }
+            }
+            if let Some(r) = rev {
+                lockfile.nixpkgs.rev = Some(r.clone());
+            }
 
             let targets: Vec<String> = if attrs.is_empty() {
                 lockfile
@@ -402,7 +446,11 @@ async fn main() -> anyhow::Result<()> {
 
             for attr in targets {
                 let sp = resolver.update(&mut lockfile, &system, &attr).await?;
-                println!("updated {attr} ({system}) -> {}", sp.to_absolute_path());
+                println!(
+                    "updated {attr} ({system}, {}) -> {}",
+                    lockfile.nixpkgs.channel,
+                    sp.to_absolute_path()
+                );
             }
             lockfile.save(&cli.lockfile)?;
             Ok(())

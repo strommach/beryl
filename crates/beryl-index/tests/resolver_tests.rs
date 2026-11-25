@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use beryl_index::{HydraConfig, Lockfile, NixpkgsResolver, ResolutionSource};
+use beryl_index::{
+    HydraConfig, Lockfile, NixpkgsResolver, ResolutionSource, flake_ref_for_pin,
+    hydra_job_for_channel,
+};
 use beryl_nix::narinfo::parse_keypair;
 use beryl_nix::narinfo_ext::parse_narinfo;
 use beryl_nix::nixbase32;
@@ -110,8 +113,8 @@ async fn resolver_uses_lockfile_first_then_hydra_with_cache_verification() {
     .unwrap();
     let hydra = HydraConfig {
         base_url: mock_url,
-        project: "nixpkgs".to_string(),
-        jobset: "trunk".to_string(),
+        project: Some("nixpkgs".to_string()),
+        jobset: Some("trunk".to_string()),
     };
 
     let resolver = NixpkgsResolver::new(hydra, cache)
@@ -152,4 +155,41 @@ async fn resolver_uses_lockfile_first_then_hydra_with_cache_verification() {
         .await
         .expect("resolve offline from lockfile");
     assert_eq!(pinned, rg_path);
+}
+
+#[test]
+fn channel_mapping_supports_unstable_stable_and_custom_rev() {
+    assert_eq!(
+        hydra_job_for_channel("nixos-unstable", "ripgrep", "aarch64-linux"),
+        (
+            "nixpkgs".to_string(),
+            "trunk".to_string(),
+            "ripgrep.aarch64-linux".to_string()
+        )
+    );
+    assert_eq!(
+        hydra_job_for_channel("nixos-25.05", "ripgrep", "x86_64-linux"),
+        (
+            "nixos".to_string(),
+            "release-25.05".to_string(),
+            "nixpkgs.ripgrep.x86_64-linux".to_string()
+        )
+    );
+    assert_eq!(
+        hydra_job_for_channel("nixpkgs-25.05-darwin", "ripgrep", "aarch64-darwin"),
+        (
+            "nixpkgs".to_string(),
+            "nixpkgs-25.05-darwin".to_string(),
+            "ripgrep.aarch64-darwin".to_string()
+        )
+    );
+
+    assert_eq!(
+        flake_ref_for_pin("nixos-25.05", None),
+        "github:NixOS/nixpkgs/nixos-25.05"
+    );
+    assert_eq!(
+        flake_ref_for_pin("nixos-25.05", Some("deadbeef")),
+        "github:NixOS/nixpkgs/deadbeef"
+    );
 }

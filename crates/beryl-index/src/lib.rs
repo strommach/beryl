@@ -6,4 +6,6 @@ pub mod resolver;
 
 pub use error::{IndexError, Result};
 pub use lockfile::{LockedPackage, Lockfile, NixpkgsPin, ResolutionSource};
-pub use resolver::{HydraConfig, NixpkgsResolver, current_system};
+pub use resolver::{
+    HydraConfig, NixpkgsResolver, current_system, flake_ref_for_pin, hydra_job_for_channel,
+};

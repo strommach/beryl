@@ -36,7 +36,13 @@ nix eval --raw <flake>#legacyPackages.<system>.<attr>.outPath
 
 and persists the resulting store path into `beryl.lock` with `source = "nix-eval"`.
 
-## Managing Pins
+## Managing Pins & Channels
 
-- `beryl lock <attrs...>`: Resolve and pin attributes into `beryl.lock`.
-- `beryl update [attrs...]`: Bypass `beryl.lock` to refresh pinned attributes (or all pinned attributes for the target system if none are specified).
+- `beryl lock [--channel <CH>] [--rev <COMMIT>] <attrs...>`: Resolve and pin attributes into `beryl.lock`.
+- `beryl update [--channel <CH>] [--rev <COMMIT>] [attrs...]`: Bypass `beryl.lock` to refresh pinned attributes (or switch channels, e.g. `beryl update --channel nixos-25.05` or `beryl update --channel nixos-unstable`).
+
+Channel mapping:
+- `nixos-unstable` / `nixpkgs-unstable` → Hydra `nixpkgs/trunk` (`<attr>.<system>`)
+- `nixos-<XX.YY>` (e.g. `nixos-25.05`) → Hydra `nixos/release-<XX.YY>` (`nixpkgs.<attr>.<system>`)
+- `nixpkgs-<XX.YY>-darwin` → Hydra `nixpkgs/nixpkgs-<XX.YY>-darwin` (`<attr>.<system>`)
+- Custom `--rev <commit>` → Tier 3 `github:NixOS/nixpkgs/<commit>`

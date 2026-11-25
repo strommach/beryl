@@ -52,9 +52,13 @@ Query `NarSize`, `NarHash`, `Deriver`, `CA`, and `References` for a store path.
 
 ### `beryl lock <ATTRS...>`
 Resolve and pin `nixpkgs` attributes into `beryl.lock`.
+- `--channel <CHANNEL>`: Set `nixpkgs.channel` (e.g. `nixos-unstable`, `nixos-25.05`).
+- `--rev <COMMIT>`: Pin a custom `nixpkgs` git commit.
 
 ### `beryl update [ATTRS...]`
 Refresh pinned `nixpkgs` attributes in `beryl.lock`.
+- `--channel <CHANNEL>`: Switch `nixpkgs.channel` and re-resolve pinned packages.
+- `--rev <COMMIT>`: Pin a custom `nixpkgs` git commit and re-resolve pinned packages.
 
 ### `beryl rollback`
 Atomically revert the active profile to the previous generation.

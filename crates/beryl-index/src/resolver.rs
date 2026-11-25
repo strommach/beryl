@@ -36,17 +36,63 @@ pub fn current_system() -> Result<String> {
 #[derive(Debug, Clone)]
 pub struct HydraConfig {
     pub base_url: String,
-    pub project: String,
-    pub jobset: String,
+    /// Optional explicit Hydra project override (when `None`, derived from `lockfile.nixpkgs.channel`).
+    pub project: Option<String>,
+    /// Optional explicit Hydra jobset override (when `None`, derived from `lockfile.nixpkgs.channel`).
+    pub jobset: Option<String>,
 }
 
 impl Default for HydraConfig {
     fn default() -> Self {
         Self {
             base_url: "https://hydra.nixos.org".to_string(),
-            project: "nixpkgs".to_string(),
-            jobset: "trunk".to_string(),
+            project: None,
+            jobset: None,
         }
+    }
+}
+
+/// Map a Nixpkgs channel name (e.g. `nixos-unstable`, `nixos-25.05`, `nixpkgs-25.05-darwin`)
+/// to its Hydra `(project, jobset, job_name)` tuple.
+pub fn hydra_job_for_channel(channel: &str, attr: &str, system: &str) -> (String, String, String) {
+    let ch = channel.trim();
+    match ch {
+        "" | "unstable" | "nixos-unstable" | "nixpkgs-unstable" => (
+            "nixpkgs".to_string(),
+            "trunk".to_string(),
+            format!("{attr}.{system}"),
+        ),
+        _ if ch.starts_with("nixos-") => {
+            // Stable NixOS channels (e.g. `nixos-25.05` -> `nixos/release-25.05`, job `nixpkgs.<attr>.<system>`)
+            let ver = ch.trim_start_matches("nixos-");
+            (
+                "nixos".to_string(),
+                format!("release-{ver}"),
+                format!("nixpkgs.{attr}.{system}"),
+            )
+        }
+        _ if ch.starts_with("release-") => (
+            "nixos".to_string(),
+            ch.to_string(),
+            format!("nixpkgs.{attr}.{system}"),
+        ),
+        other => (
+            "nixpkgs".to_string(),
+            other.to_string(),
+            format!("{attr}.{system}"),
+        ),
+    }
+}
+
+/// Compute the `nix eval` flake reference for a channel and optional pinned git commit.
+pub fn flake_ref_for_pin(channel: &str, rev: Option<&str>) -> String {
+    if let Some(r) = rev.filter(|s| !s.trim().is_empty()) {
+        return format!("github:NixOS/nixpkgs/{}", r.trim());
+    }
+    let ch = channel.trim();
+    match ch {
+        "" | "unstable" => "github:NixOS/nixpkgs/nixos-unstable".to_string(),
+        other => format!("github:NixOS/nixpkgs/{other}"),
     }
 }
 
@@ -121,9 +167,11 @@ impl NixpkgsResolver {
         system: &str,
         attr: &str,
     ) -> Result<StorePath> {
+        let channel = lockfile.nixpkgs.channel.clone();
+
         // Tier 2: Upstream Hydra JSON endpoint (skipped when user pinned a custom nixpkgs git rev)
         if lockfile.nixpkgs.rev.is_none()
-            && let Some(path) = self.query_hydra(system, attr).await?
+            && let Some(path) = self.query_hydra(&channel, system, attr).await?
         {
             // Confirm .narinfo exists and signature verifies on the configured binary cache.
             if self.cache.fetch_path_info(&path).await?.is_none() {
@@ -132,7 +180,7 @@ impl NixpkgsResolver {
                     path: path.to_absolute_path(),
                 });
             }
-            info!(%system, %attr, path = %path.to_absolute_path(), "resolved via Hydra + cache.nixos.org");
+            info!(%channel, %system, %attr, path = %path.to_absolute_path(), "resolved via Hydra + cache.nixos.org");
             lockfile.insert(system, attr, &path, ResolutionSource::Hydra);
             return Ok(path);
         }
@@ -140,10 +188,10 @@ impl NixpkgsResolver {
         // Tier 3: `nix eval` fallback
         if self.enable_nix_eval
             && let Some(path) = self
-                .query_nix_eval(lockfile.nixpkgs.rev.as_deref(), system, attr)
+                .query_nix_eval(&channel, lockfile.nixpkgs.rev.as_deref(), system, attr)
                 .await?
         {
-            info!(%system, %attr, path = %path.to_absolute_path(), "resolved via `nix eval`");
+            info!(%channel, %system, %attr, path = %path.to_absolute_path(), "resolved via `nix eval`");
             lockfile.insert(system, attr, &path, ResolutionSource::NixEval);
             return Ok(path);
         }
@@ -154,12 +202,19 @@ impl NixpkgsResolver {
         })
     }
 
-    async fn query_hydra(&self, system: &str, attr: &str) -> Result<Option<StorePath>> {
+    async fn query_hydra(
+        &self,
+        channel: &str,
+        system: &str,
+        attr: &str,
+    ) -> Result<Option<StorePath>> {
         let base = self.hydra.base_url.trim_end_matches('/');
-        let url = format!(
-            "{base}/job/{}/{}/{attr}.{system}/latest",
-            self.hydra.project, self.hydra.jobset
-        );
+        let (default_project, default_jobset, job_name) =
+            hydra_job_for_channel(channel, attr, system);
+        let project = self.hydra.project.as_deref().unwrap_or(&default_project);
+        let jobset = self.hydra.jobset.as_deref().unwrap_or(&default_jobset);
+
+        let url = format!("{base}/job/{project}/{jobset}/{job_name}/latest");
         debug!(%url, "querying Hydra job endpoint");
 
         let resp = match self
@@ -199,14 +254,12 @@ impl NixpkgsResolver {
 
     async fn query_nix_eval(
         &self,
+        channel: &str,
         rev: Option<&str>,
         system: &str,
         attr: &str,
     ) -> Result<Option<StorePath>> {
-        let flake_ref = match rev {
-            Some(r) => format!("github:NixOS/nixpkgs/{r}"),
-            None => "nixpkgs".to_string(),
-        };
+        let flake_ref = flake_ref_for_pin(channel, rev);
         let expr = format!("{flake_ref}#legacyPackages.{system}.{attr}.outPath");
         debug!(%expr, "running nix eval fallback");
 
