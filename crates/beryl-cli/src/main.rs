@@ -1,7 +1,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
+use std::sync::{Arc, Mutex};
 
+use beryl_eval::{EvalError, Evaluator, NixpkgsLookup};
 use beryl_index::{HydraConfig, Lockfile, NixpkgsResolver, current_system};
 use beryl_nix::narinfo_ext::parse_verifying_key;
 use beryl_nix::store_path::StorePath;
@@ -67,6 +69,17 @@ enum Commands {
     Update {
         /// Specific attributes to refresh (defaults to all pinned packages for the current system)
         attrs: Vec<String>,
+    },
+    /// Evaluate a pkg.lua into Nix ATerm `.drv` files
+    Eval {
+        /// Path to `pkg.lua`
+        path: PathBuf,
+        /// Write evaluated `.drv` files into the local store
+        #[arg(long)]
+        write: bool,
+        /// Print the root derivation's raw ATerm representation
+        #[arg(long)]
+        aterm: bool,
     },
     /// Evaluate a pkg.lua, fetch substitutes, and build into the store
     Build { path: String },
@@ -316,6 +329,61 @@ async fn main() -> anyhow::Result<()> {
                 report.freed_bytes,
                 report.live_paths
             );
+            Ok(())
+        }
+        Commands::Eval { path, write, aterm } => {
+            let client = build_cache_client(&cli)?;
+            let resolver = NixpkgsResolver::new(HydraConfig::default(), client)?;
+            let lockfile = Arc::new(Mutex::new(Lockfile::load_or_default(&cli.lockfile)?));
+            let handle = tokio::runtime::Handle::current();
+
+            struct CliLookup {
+                resolver: NixpkgsResolver,
+                lockfile: Arc<Mutex<Lockfile>>,
+                handle: tokio::runtime::Handle,
+            }
+
+            impl NixpkgsLookup for CliLookup {
+                fn resolve_nixpkgs(&self, system: &str, attr: &str) -> beryl_eval::Result<StorePath> {
+                    let mut lf = self.lockfile.lock().expect("lockfile mutex poisoned");
+                    self.handle
+                        .block_on(self.resolver.resolve(&mut lf, system, attr))
+                        .map_err(EvalError::from)
+                }
+            }
+
+            let lookup = Arc::new(CliLookup {
+                resolver,
+                lockfile: Arc::clone(&lockfile),
+                handle,
+            });
+            let path = path.clone();
+            let eval_system = system.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                let evaluator = Evaluator::new(eval_system, lookup);
+                evaluator.eval_file(&path)
+            })
+            .await??;
+
+            lockfile
+                .lock()
+                .expect("lockfile mutex poisoned")
+                .save(&cli.lockfile)?;
+
+            if *write {
+                let store = LocalStore::open(&cli.store)?;
+                res.write_drvs_to_store(&store).await?;
+            }
+
+            let drv_path = res.root.drv_path.as_ref().expect("root has drv_path");
+            if *aterm {
+                let bytes = res.derivations[drv_path].to_aterm_bytes();
+                print!("{}", String::from_utf8_lossy(&bytes));
+            } else {
+                println!("drv: {}", drv_path.to_absolute_path());
+                println!("out: {}", res.root.out_path.to_absolute_path());
+                println!("derivations: {}", res.derivations.len());
+            }
             Ok(())
         }
         Commands::Build { path } => anyhow::bail!("`beryl build {path}` is not implemented yet"),
