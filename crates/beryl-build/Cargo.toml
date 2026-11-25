@@ -4,8 +4,17 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+aho-corasick.workspace = true
+beryl-eval.workspace = true
 beryl-nix.workspace = true
 beryl-store.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
