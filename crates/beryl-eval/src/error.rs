@@ -26,6 +26,9 @@ pub enum EvalError {
 
     #[error("pkg.lua must return a beryl.derivation(...) value")]
     InvalidReturnValue,
+
+    #[error("beryl.lua must return a table (with optional `shells`, `packages`, `description`)")]
+    InvalidManifest,
 }
 
 pub type Result<T> = std::result::Result<T, EvalError>;

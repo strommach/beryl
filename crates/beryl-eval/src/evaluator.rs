@@ -18,6 +18,7 @@ use beryl_store::{LocalStore, Store, ValidPathInfo};
 use mlua::{Lua, Table, Value};
 
 use crate::error::{EvalError, Result};
+use crate::project::{DevShellRef, DevShellSpec, ProjectManifest};
 use crate::store_ref::StoreRef;
 
 /// Callback trait for resolving `beryl.nixpkgs("attr")` during Lua evaluation.
@@ -124,6 +125,88 @@ impl Evaluator {
 
     /// Evaluate a Lua package definition string.
     pub fn eval_str(&self, source: &str, chunk_name: &str) -> Result<EvalResult> {
+        let (lua, state) = self.create_lua_env()?;
+
+        let value: Value = lua.load(source).set_name(chunk_name).eval()?;
+        let root = match value {
+            Value::UserData(ud) => ud.borrow::<StoreRef>()?.clone(),
+            _ => return Err(EvalError::InvalidReturnValue),
+        };
+
+        let st = state.lock().expect("eval state mutex poisoned");
+        Ok(EvalResult {
+            root,
+            derivations: st.derivations.clone(),
+            input_sources: st.input_sources.clone(),
+        })
+    }
+
+    /// Evaluate a `beryl.lua` project manifest file from disk.
+    pub fn eval_project_file(&self, path: &Path) -> Result<ProjectManifest> {
+        let source = fs::read_to_string(path)?;
+        let chunk_name = path.display().to_string();
+        self.eval_project_str(&source, &chunk_name)
+    }
+
+    /// Evaluate a `beryl.lua` project manifest string.
+    pub fn eval_project_str(&self, source: &str, chunk_name: &str) -> Result<ProjectManifest> {
+        let (lua, state) = self.create_lua_env()?;
+
+        let value: Value = lua.load(source).set_name(chunk_name).eval()?;
+        let tbl = match value {
+            Value::Table(t) => t,
+            _ => return Err(EvalError::InvalidManifest),
+        };
+
+        let description: Option<String> = tbl.get("description")?;
+
+        let mut shells = BTreeMap::new();
+        if let Some(shells_tbl) = tbl.get::<Option<Table>>("shells")? {
+            for pair in shells_tbl.pairs::<String, Value>() {
+                let (name, val) = pair?;
+                let spec = match val {
+                    Value::UserData(ud) => ud.borrow::<DevShellRef>()?.0.clone(),
+                    Value::Table(t) => parse_shell_table(&t)?,
+                    other => {
+                        return Err(EvalError::Lua(mlua::Error::RuntimeError(format!(
+                            "shells.{name} must be a beryl.shell(...) or table, got {}",
+                            other.type_name()
+                        ))));
+                    }
+                };
+                shells.insert(name, spec);
+            }
+        }
+
+        let mut packages = BTreeMap::new();
+        if let Some(pkgs_tbl) = tbl.get::<Option<Table>>("packages")? {
+            for pair in pkgs_tbl.pairs::<String, Value>() {
+                let (name, val) = pair?;
+                match val {
+                    Value::UserData(ud) => {
+                        packages.insert(name, ud.borrow::<StoreRef>()?.clone());
+                    }
+                    other => {
+                        return Err(EvalError::Lua(mlua::Error::RuntimeError(format!(
+                            "packages.{name} must be a StoreRef/derivation, got {}",
+                            other.type_name()
+                        ))));
+                    }
+                }
+            }
+        }
+
+        let st = state.lock().expect("eval state mutex poisoned");
+        Ok(ProjectManifest {
+            description,
+            shells,
+            packages,
+            derivations: st.derivations.clone(),
+            input_sources: st.input_sources.clone(),
+        })
+    }
+
+    fn create_lua_env(&self) -> Result<(Lua, Arc<Mutex<EvalState>>)> {
         let lua = Lua::new();
         let state = Arc::new(Mutex::new(EvalState::default()));
 
@@ -380,21 +463,81 @@ impl Evaluator {
             beryl_tbl.set("derivation", f)?;
         }
 
+        // 4. beryl.shell({ packages?, libs?, env?, hook? })
+        {
+            let f = lua.create_function(|_, spec: Table| {
+                let shell = parse_shell_table(&spec)?;
+                Ok(DevShellRef(shell))
+            })?;
+            beryl_tbl.set("shell", f)?;
+        }
+
         lua.globals().set("beryl", beryl_tbl)?;
-
-        let value: Value = lua.load(source).set_name(chunk_name).eval()?;
-        let root = match value {
-            Value::UserData(ud) => ud.borrow::<StoreRef>()?.clone(),
-            _ => return Err(EvalError::InvalidReturnValue),
-        };
-
-        let st = state.lock().expect("eval state mutex poisoned");
-        Ok(EvalResult {
-            root,
-            derivations: st.derivations.clone(),
-            input_sources: st.input_sources.clone(),
-        })
+        Ok((lua, state))
     }
+}
+
+fn parse_shell_table(spec: &Table) -> mlua::Result<DevShellSpec> {
+    let mut packages = Vec::new();
+    if let Some(pkgs_tbl) = spec.get::<Option<Table>>("packages")? {
+        for val in pkgs_tbl.sequence_values::<Value>() {
+            let val = val?;
+            match val {
+                Value::UserData(ud) => packages.push(ud.borrow::<StoreRef>()?.clone()),
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "`packages` entries must be StoreRef values, got {}",
+                        other.type_name()
+                    )));
+                }
+            }
+        }
+    }
+
+    let mut libs = Vec::new();
+    if let Some(libs_tbl) = spec.get::<Option<Table>>("libs")? {
+        for val in libs_tbl.sequence_values::<Value>() {
+            let val = val?;
+            match val {
+                Value::UserData(ud) => libs.push(ud.borrow::<StoreRef>()?.clone()),
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "`libs` entries must be StoreRef values, got {}",
+                        other.type_name()
+                    )));
+                }
+            }
+        }
+    }
+
+    let mut env = BTreeMap::new();
+    if let Some(env_tbl) = spec.get::<Option<Table>>("env")? {
+        for pair in env_tbl.pairs::<String, Value>() {
+            let (k, v) = pair?;
+            let val_str = match v {
+                Value::String(s) => s.to_str()?.to_string(),
+                Value::Integer(i) => i.to_string(),
+                Value::Number(n) => n.to_string(),
+                Value::Boolean(b) => if b { "1" } else { "" }.to_string(),
+                Value::UserData(ud) => ud.borrow::<StoreRef>()?.out_path.to_absolute_path(),
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "unsupported env value type for '{k}': {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            env.insert(k, val_str);
+        }
+    }
+
+    let hook: Option<String> = spec.get("hook")?;
+    Ok(DevShellSpec {
+        packages,
+        libs,
+        env,
+        hook,
+    })
 }
 
 fn register_input(
