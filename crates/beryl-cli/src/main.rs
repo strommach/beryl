@@ -10,7 +10,8 @@ use beryl_nix::narinfo_ext::parse_verifying_key;
 use beryl_nix::store_path::StorePath;
 use beryl_nix::store_path_ext::parse_store_path;
 use beryl_store::{
-    BinaryCacheClient, BinaryCacheConfig, LocalStore, ProfileManager, Store, collect_garbage,
+    BinaryCacheClient, BinaryCacheConfig, DEFAULT_DAEMON_SOCKET, DaemonStore, LocalStore,
+    ProfileManager, Store, collect_garbage,
 };
 use clap::{Parser, Subcommand};
 
@@ -24,6 +25,19 @@ struct Cli {
     /// Root directory for the local store (contains `store/` and `var/nix/`)
     #[arg(long, env = "BERYL_STORE_DIR", default_value = "/nix", global = true)]
     store: PathBuf,
+
+    /// Talk to a running `nix-daemon` instead of accessing the local store DB directly
+    #[arg(long, env = "BERYL_USE_DAEMON", global = true)]
+    daemon: bool,
+
+    /// Unix socket path for `nix-daemon` (used with `--daemon`)
+    #[arg(
+        long,
+        env = "BERYL_DAEMON_SOCKET",
+        default_value = DEFAULT_DAEMON_SOCKET,
+        global = true
+    )]
+    daemon_socket: PathBuf,
 
     /// Binary cache base URL
     #[arg(
@@ -58,6 +72,11 @@ struct Cli {
 enum Commands {
     /// Fetch a store path and its full runtime closure from a binary cache
     Fetch {
+        /// Store path (`/nix/store/<hash>-<name>` or `<hash>-<name>`)
+        store_path: String,
+    },
+    /// Query metadata and runtime references for a store path
+    Info {
         /// Store path (`/nix/store/<hash>-<name>` or `<hash>-<name>`)
         store_path: String,
     },
@@ -195,26 +214,70 @@ async fn main() -> anyhow::Result<()> {
 
     match &cli.command {
         Commands::Fetch { store_path } => {
-            let store = LocalStore::open(&cli.store)?;
             let client = build_cache_client(&cli)?;
             let parsed = parse_store_path(store_path)?;
 
-            let newly_installed = client.fetch_closure(&store, &parsed).await?;
-            let full_closure = store.query_closure(&parsed).await?;
-
-            if newly_installed.is_empty() {
+            if cli.daemon {
+                let store = DaemonStore::connect(&cli.daemon_socket).await?;
+                let newly_installed = client.fetch_closure(&store, &parsed).await?;
+                let full_closure = store.query_closure(&parsed).await?;
                 println!(
-                    "already present: {} ({} paths in closure)",
-                    parsed.to_absolute_path(),
-                    full_closure.len()
-                );
-            } else {
-                println!(
-                    "fetched {} new paths ({} total in closure) -> {}",
+                    "daemon fetch: {} new paths ({} total in closure) -> {}",
                     newly_installed.len(),
                     full_closure.len(),
                     store.real_path(&parsed).display()
                 );
+            } else {
+                let store = LocalStore::open(&cli.store)?;
+                let newly_installed = client.fetch_closure(&store, &parsed).await?;
+                let full_closure = store.query_closure(&parsed).await?;
+
+                if newly_installed.is_empty() {
+                    println!(
+                        "already present: {} ({} paths in closure)",
+                        parsed.to_absolute_path(),
+                        full_closure.len()
+                    );
+                } else {
+                    println!(
+                        "fetched {} new paths ({} total in closure) -> {}",
+                        newly_installed.len(),
+                        full_closure.len(),
+                        store.real_path(&parsed).display()
+                    );
+                }
+            }
+            Ok(())
+        }
+        Commands::Info { store_path } => {
+            let parsed = parse_store_path(store_path)?;
+            let info = if cli.daemon {
+                let store = DaemonStore::connect(&cli.daemon_socket).await?;
+                store.query_path_info(&parsed).await?
+            } else {
+                let store = LocalStore::open(&cli.store)?;
+                store.query_path_info(&parsed).await?
+            };
+
+            match info {
+                Some(info) => {
+                    println!("Path:       {}", info.path.to_absolute_path());
+                    println!("NarSize:    {} bytes", info.nar_size);
+                    println!("NarHash:    sha256:{}", hex::encode(info.nar_hash));
+                    if let Some(drv) = &info.deriver {
+                        println!("Deriver:    {}", drv.to_absolute_path());
+                    }
+                    if let Some(ca) = &info.ca {
+                        println!("CA:         {ca}");
+                    }
+                    println!("References: {}", info.references.len());
+                    for r in &info.references {
+                        println!("  - {}", r.to_absolute_path());
+                    }
+                }
+                None => {
+                    anyhow::bail!("store path not found: {}", parsed.to_absolute_path());
+                }
             }
             Ok(())
         }

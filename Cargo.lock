@@ -160,6 +160,7 @@ dependencies = [
  "beryl-nix",
  "beryl-store",
  "clap",
+ "hex",
  "tokio",
  "tracing",
  "tracing-subscriber",
