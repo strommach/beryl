@@ -1,4 +1,5 @@
 mod develop;
+mod templates;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -113,6 +114,28 @@ enum Commands {
     },
     /// Build/fetch a package (`nixpkgs#<attr>`, `/nix/store/...`, or `./pkg.lua`) and link into active profile
     Install { target: String },
+    /// Scaffold a `beryl.lua` project manifest from a built-in template
+    Init {
+        /// Template name (e.g. `rust`, `c`, `cpp`, `python`, `node`, `web`, `java`, `go`, `minimal`)
+        #[arg(default_value = "minimal")]
+        template: String,
+
+        /// List all available project templates
+        #[arg(long)]
+        list: bool,
+
+        /// Output path for the generated manifest
+        #[arg(long, short = 'o', default_value = "beryl.lua")]
+        output: PathBuf,
+
+        /// Overwrite an existing `beryl.lua`
+        #[arg(long)]
+        force: bool,
+
+        /// Also generate a `.envrc` file for `direnv` integration
+        #[arg(long)]
+        direnv: bool,
+    },
     /// Enter a project dev shell defined in `beryl.lua`
     Develop {
         /// Shell name inside `shells = { ... }` (defaults to `default`)
@@ -441,6 +464,68 @@ async fn main() -> anyhow::Result<()> {
                     gen_num,
                     profile.active_link().display()
                 );
+            }
+            Ok(())
+        }
+        Commands::Init {
+            template,
+            list,
+            output,
+            force,
+            direnv,
+        } => {
+            if *list {
+                println!("Available Beryl project templates:");
+                for tpl in templates::TEMPLATES {
+                    if tpl.aliases.is_empty() {
+                        println!("  {:<10} {}", tpl.name, tpl.summary);
+                    } else {
+                        println!(
+                            "  {:<10} {} (aliases: {})",
+                            tpl.name,
+                            tpl.summary,
+                            tpl.aliases.join(", ")
+                        );
+                    }
+                }
+                return Ok(());
+            }
+
+            let tpl = templates::find_template(template).ok_or_else(|| {
+                let names: Vec<&str> = templates::TEMPLATES.iter().map(|t| t.name).collect();
+                anyhow::anyhow!(
+                    "unknown template '{template}' (available: {}; run `beryl init --list`)",
+                    names.join(", ")
+                )
+            })?;
+
+            if output.exists() && !*force {
+                anyhow::bail!(
+                    "{} already exists (pass `--force` to overwrite)",
+                    output.display()
+                );
+            }
+
+            std::fs::write(output, tpl.content)?;
+            println!(
+                "created {} from '{}' template ({})",
+                output.display(),
+                tpl.name,
+                tpl.summary
+            );
+
+            if *direnv {
+                let envrc = output
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| p.join(".envrc"))
+                    .unwrap_or_else(|| PathBuf::from(".envrc"));
+                let flag = if cli.daemon { " --daemon" } else { "" };
+                std::fs::write(
+                    &envrc,
+                    format!("watch_file beryl.lua beryl.lock\neval \"$(beryl{flag} develop --export)\"\n"),
+                )?;
+                println!("created {} for direnv integration", envrc.display());
             }
             Ok(())
         }
