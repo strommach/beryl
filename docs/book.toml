@@ -1,0 +1,10 @@
+[book]
+title = "Beryl Documentation"
+authors = ["strommach"]
+language = "en"
+description = "A Lua-driven, /nix/store-compatible package manager and dev-shell tool."
+
+[output.html]
+git-repository-url = "https://github.com/strommach/beryl"
+default-theme = "rust"
+preferred-dark-theme = "ayu"
